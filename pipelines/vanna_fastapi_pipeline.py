@@ -1,7 +1,7 @@
 """
 title: Vanna Pipeline
 author: Nichi
-author_url: Your URL (e.g., https://github.com/nichiyoo)
+author_url: https://github.com/nichiyoo
 description: Generates SQL queries from natural language questions using a Vanna backend.
 required_open_webui_version: 0.4.3
 requirements: requests
@@ -21,6 +21,74 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
+def _generate_sql_from_vanna(api_url: str, question: str, verify_ssl: bool) -> dict:
+    """
+    Generates an SQL query by sending a natural language question to the Vanna backend.
+
+    Args:
+        api_url (str): The base URL of the Vanna backend.
+        question (str): The natural language question to generate SQL for.
+        verify_ssl (bool): Whether to verify SSL certificates for the request.
+
+    Returns:
+        dict: The JSON response from the Vanna API, expected to contain 'text' and 'id'.
+
+    Raises:
+        requests.exceptions.RequestException: For any HTTP or connection errors.
+        requests.exceptions.HTTPStatusError: For bad HTTP responses (4xx or 5xx).
+        json.JSONDecodeError: If the response is not valid JSON.
+        ValueError: If the 'text' or 'id' field is missing from the Vanna response.
+    """
+    endpoint = urljoin(api_url, "/api/generate_sql")
+    params = {
+        "question": question,
+    }
+
+    response = requests.get(endpoint, params=params, verify=verify_ssl)
+    response.raise_for_status()
+
+    sql_response = response.json()
+    if "text" in sql_response and "id" in sql_response:
+        return sql_response
+    else:
+        raise ValueError(
+            "Vanna: Invalid response from SQL generation service. Missing 'text' or 'id'."
+        )
+
+
+def _run_sql_query(api_url: str, cache_id: str, verify_ssl: bool) -> str:
+    """
+    Executes an SQL query using the Vanna backend's run_sql endpoint.
+
+    Args:
+        api_url (str): The base URL of the Vanna backend.
+        cache_id (str): The cache ID of the generated SQL query.
+        verify_ssl (bool): Whether to verify SSL certificates for the request.
+
+    Returns:
+        str: The DataFrame result as a string.
+
+    Raises:
+        requests.exceptions.RequestException: For any HTTP or connection errors.
+        requests.exceptions.HTTPStatusError: For bad HTTP responses (4xx or 5xx).
+        json.JSONDecodeError: If the response is not valid JSON.
+        ValueError: If the 'df' field is missing from the Vanna response.
+    """
+    endpoint = urljoin(api_url, "/api/run_sql")
+    params = {
+        "id": cache_id,
+    }
+
+    response = requests.get(endpoint, params=params, verify=verify_ssl)
+    response.raise_for_status()
+
+    df_response = response.json()
+    if "df" in df_response:
+        return df_response["df"]
+    else:
+        raise ValueError("Vanna: 'df' field missing from run_sql response.")
+
+
 class Pipeline:
     class Valves(BaseModel):
         API_URL: str = Field(
@@ -38,13 +106,9 @@ class Pipeline:
 
     def __init__(self):
         self.name = "Vanna Pipeline"
-        self.valves = self.Valves(
-            **{k: os.getenv(k, v.default) for k, v in self.Valves.model_fields.items()}
-        )
-        if self.valves.DEBUG:
-            logger.setLevel(logging.DEBUG)
-        else:
-            logger.setLevel(logging.INFO)
+        fields = self.Valves.model_fields.items()
+        self.valves = self.Valves(**{k: os.getenv(k, v.default) for k, v in fields})
+        logger.setLevel(logging.DEBUG if self.valves.DEBUG else logging.INFO)
 
     async def on_startup(self):
         logger.info("on_startup: %s" % self.name)
@@ -73,7 +137,11 @@ class Pipeline:
         return body
 
     def pipe(
-        self, user_message: str, model_id: str, messages: List[dict], body: dict
+        self,
+        user_message: str,
+        model_id: str,
+        messages: List[dict],
+        body: dict,
     ) -> Union[str, Generator, Iterator]:
         logger.info("pipe: %s" % self.name)
 
@@ -83,44 +151,64 @@ class Pipeline:
             )
 
         try:
-            sql_text = _generate_sql_from_vanna(
+            yield {
+                "event": {
+                    "type": "status",
+                    "data": {"description": "Vanna: Generating SQL...", "done": False},
+                }
+            }
+
+            vanna_response = _generate_sql_from_vanna(
                 api_url=self.valves.API_URL,
                 question=user_message,
                 verify_ssl=self.valves.VERIFY_SSL,
             )
+            sql_text = vanna_response["text"]
+            cache_id = vanna_response["id"]
 
             yield "```sql\n%s\n```" % sql_text
+
+            yield {
+                "event": {
+                    "type": "status",
+                    "data": {
+                        "description": "Vanna: Running SQL query...",
+                        "done": False,
+                    },
+                }
+            }
+
+            df_result = _run_sql_query(
+                api_url=self.valves.API_URL,
+                cache_id=cache_id,
+                verify_ssl=self.valves.VERIFY_SSL,
+            )
+
+            yield {
+                "event": {
+                    "type": "status",
+                    "data": {
+                        "description": "Vanna: SQL execution complete.",
+                        "done": True,
+                    },
+                }
+            }
+
+            yield "\n```json\n%s\n```" % df_result
+
         except Exception as e:
-            logger.exception("Vanna: An error occurred during SQL generation: %s" % e)
-            yield "Vanna: An error occurred while generating SQL. Please try again."
+            logger.exception(
+                "Vanna: An error occurred during SQL generation/execution: %s" % e
+            )
 
+            yield {
+                "event": {
+                    "type": "status",
+                    "data": {
+                        "description": "Vanna: Error during SQL process.",
+                        "done": True,
+                    },
+                }
+            }
 
-def _generate_sql_from_vanna(api_url: str, question: str, verify_ssl: bool) -> str:
-    """
-    Generates an SQL query by sending a natural language question to the Vanna backend.
-
-    Args:
-        api_url (str): The base URL of the Vanna backend.
-        question (str): The natural language question to generate SQL for.
-        verify_ssl (bool): Whether to verify SSL certificates for the request.
-
-    Returns:
-        str: The generated SQL query.
-
-    Raises:
-        requests.exceptions.RequestException: For any HTTP or connection errors.
-        json.JSONDecodeError: If the response is not valid JSON.
-        ValueError: If the 'text' field is missing from the Vanna response.
-    """
-    generate_sql_endpoint = urljoin(api_url, "/api/generate_sql")
-    params = {"question": question}
-
-    response = requests.get(generate_sql_endpoint, params=params, verify=verify_ssl)
-    response.raise_for_status()
-
-    sql_response = response.json()
-
-    if "text" in sql_response:
-        return sql_response["text"]
-    else:
-        raise ValueError("Vanna: 'text' field missing from response.")
+            yield "Vanna: An error occurred while generating or executing SQL. Please try again."
