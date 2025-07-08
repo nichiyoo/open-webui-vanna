@@ -2,7 +2,7 @@
 title: Vanna Pipeline
 author: Nichi
 author_url: https://github.com/nichiyoo
-description: Generates SQL queries from natural language questions using a Vanna backend.
+description: Generates SQL queries from natural language questions using a Vanna backend, and formats results with Ollama.
 required_open_webui_version: 0.4.3
 requirements: requests
 version: 0.4.3
@@ -16,6 +16,7 @@ from pprint import pprint
 from urllib.parse import urljoin
 from pydantic import BaseModel, Field
 from typing import List, Union, Generator, Iterator, Optional
+import json
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -66,7 +67,7 @@ def _run_sql_query(api_url: str, cache_id: str, verify_ssl: bool) -> str:
         verify_ssl (bool): Whether to verify SSL certificates for the request.
 
     Returns:
-        str: The DataFrame result as a string.
+        str: The DataFrame result as a string (expected to be stringified JSON).
 
     Raises:
         requests.exceptions.RequestException: For any HTTP or connection errors.
@@ -103,6 +104,14 @@ class Pipeline:
             default=False,
             description="Enable debug logging for the pipeline.",
         )
+        OLLAMA_BASE_URL: str = Field(
+            default="http://host.docker.internal:11434",
+            description="The base URL for the Ollama API (e.g., http://localhost:11434 or http://host.docker.internal:11434 if Ollama is on host).",
+        )
+        OLLAMA_MODEL_NAME: str = Field(
+            default="llama3",
+            description="The name of the Ollama model to use for formatting (e.g., 'llama3', 'mistral').",
+        )
 
     def __init__(self):
         self.name = "Vanna Pipeline"
@@ -137,11 +146,7 @@ class Pipeline:
         return body
 
     def pipe(
-        self,
-        user_message: str,
-        model_id: str,
-        messages: List[dict],
-        body: dict,
+        self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Union[str, Generator, Iterator]:
         logger.info("pipe: %s" % self.name)
 
@@ -178,27 +183,100 @@ class Pipeline:
                 }
             }
 
-            df_result = _run_sql_query(
+            df_result_str = _run_sql_query(
                 api_url=self.valves.API_URL,
                 cache_id=cache_id,
                 verify_ssl=self.valves.VERIFY_SSL,
+            )
+
+            try:
+                df_data = json.loads(df_result_str)
+            except json.JSONDecodeError:
+                logger.error("Vanna: Failed to decode df_result_str into JSON.")
+                yield "Vanna: Error: Could not parse SQL results for formatting."
+                return
+
+            yield {
+                "event": {
+                    "type": "status",
+                    "data": {
+                        "description": "Vanna: Rendering results in table...",
+                        "done": True,
+                    },
+                }
+            }
+
+            ollama_prompt_messages = [
+                {
+                    "role": "user",
+                    "content": "Here is some data in JSON format: %s. Please provide a brief summary or introduction to this data, and then present it as a clean and readable Markdown table. **Do not wrap the table in a code block.** Ensure all columns headers are clear."
+                    % json.dumps(df_data),
+                }
+            ]
+
+            ollama_payload = {
+                "model": self.valves.OLLAMA_MODEL_NAME,
+                "messages": ollama_prompt_messages,
+                "stream": True,
+            }
+
+            ollama_completion_url = urljoin(
+                self.valves.OLLAMA_BASE_URL, "/v1/chat/completions"
             )
 
             yield {
                 "event": {
                     "type": "status",
                     "data": {
-                        "description": "Vanna: SQL execution complete.",
+                        "description": "Vanna: Formatting results...",
+                        "done": False,
+                    },
+                }
+            }
+
+            ollama_response = requests.post(
+                ollama_completion_url,
+                json=ollama_payload,
+                stream=True,
+            )
+
+            ollama_response.raise_for_status()
+
+            yield "\n## Data result\n\n"
+
+            for chunk in ollama_response.iter_lines():
+                if chunk:
+                    decoded_chunk = chunk.decode("utf-8")
+                    if decoded_chunk.startswith("data: "):
+                        try:
+                            json_data = json.loads(decoded_chunk[6:])
+                            if (
+                                json_data.get("choices")
+                                and json_data["choices"][0].get("delta")
+                                and json_data["choices"][0]["delta"].get("content")
+                            ):
+                                yield json_data["choices"][0]["delta"]["content"]
+                        except json.JSONDecodeError:
+                            logger.error(
+                                "Vanna: Failed to decode Ollama stream chunk: %s"
+                                % decoded_chunk
+                            )
+                            continue
+
+            yield {
+                "event": {
+                    "type": "status",
+                    "data": {
+                        "description": "Vanna: SQL execution and formatting complete.",
                         "done": True,
                     },
                 }
             }
 
-            yield "\n```json\n%s\n```" % df_result
-
         except Exception as e:
             logger.exception(
-                "Vanna: An error occurred during SQL generation/execution: %s" % e
+                "Vanna: An error occurred during SQL generation/execution/formatting: %s"
+                % e
             )
 
             yield {
@@ -211,4 +289,4 @@ class Pipeline:
                 }
             }
 
-            yield "Vanna: An error occurred while generating or executing SQL. Please try again."
+            yield "Vanna: An error occurred while generating, executing, or formatting SQL. Please try again."
