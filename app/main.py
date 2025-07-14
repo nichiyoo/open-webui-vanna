@@ -10,6 +10,8 @@ from app.api.routes import questions, sql, data, training
 
 load_dotenv()
 
+origins = ["http://localhost", settings.origin_url]
+
 app = FastAPI(
     title=settings.app_title,
     version=settings.app_version,
@@ -18,7 +20,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.origin_url],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

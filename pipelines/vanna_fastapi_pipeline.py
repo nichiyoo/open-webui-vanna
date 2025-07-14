@@ -244,8 +244,8 @@ class Pipeline:
                         "**Task:**\n"
                         "Based on the processed and focused data, provide a concise, insightful summary of the key information. "
                         f"Following the summary, accurately render the data into a Markdown table using the provided structure: {df_md}\n\n"
-                        "If any entry within the data (from the JSON or already in the table structure) contains a valid image URL, embed that image directly into its corresponding table cell. Use the standard Markdown image syntax (`![description](URL)`), ensuring 'description' is a brief, relevant alternative text for the image.\n\n"
                         "**Output Format:** Your response must be **plain text**, beginning with the summary and immediately followed by the Markdown table."
+                        "All currency values must be in Rupiah or IDR (the data already saved in IDR), and all numbers must be rounded to two decimal places."
                         "**Absolutely do not wrap any part of your output in a code block**.\n"
                     ),
                 }
@@ -267,11 +267,7 @@ class Pipeline:
             chart_url = resp["chart_url"]
 
             yield "\n### Visualization\n\n"
-            yield (
-                f'<iframe src="{chart_url}" width="100%" height="500px" '
-                'frameborder="0" sandbox="allow-scripts allow-same-origin" '
-                'style="border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);"></iframe>\n\n'
-            )
+            yield f"\n![{chart_url}]({chart_url})\n\n"
 
         except APIError as e:
             logger.warning(f"Could not generate Plotly chart: {e}")

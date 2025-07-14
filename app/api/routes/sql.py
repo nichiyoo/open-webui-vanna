@@ -79,18 +79,25 @@ async def generate_plotly_figure(
 
         fig = vanna.get_plotly_figure(plotly_code=code, df=df, dark_mode=False)
         fig_json = fig.to_json()
-        full_html_content = fig.to_html(include_plotlyjs="cdn", full_html=True)
 
         os.makedirs(settings.static_folder, exist_ok=True)
+
         unique_chart_id = str(uuid.uuid4())
-        chart_filename = "vanna_chart_%s.html" % unique_chart_id
+        chart_filename = "vanna_chart_%s.jpg" % unique_chart_id
         chart_file_path = os.path.join(settings.static_folder, chart_filename)
-        with open(chart_file_path, "w", encoding="utf-8") as f:
-            f.write(full_html_content)
+
+        fig.write_image(
+            chart_file_path,
+            format="jpg",
+            width=1200,
+            height=800,
+            scale=2,
+        )
 
         chart_url = urljoin(settings.app_url, chart_file_path.replace("\\", "/"))
         cache.set(id=id, field="fig_json", value=fig_json)
         cache.set(id=id, field="chart_url", value=chart_url)
+
         return PlotlyFigureResponse(id=id, chart_url=chart_url)
 
     except Exception as e:
