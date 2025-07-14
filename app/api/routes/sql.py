@@ -1,3 +1,10 @@
+import os
+import uuid
+from app.config import settings
+from urllib.parse import urljoin
+from app.services.vanna_service import vanna
+from app.services.cache_service import get_cache
+from app.api.dependencies import requires_cache
 from fastapi import APIRouter, HTTPException, Query, Depends
 from app.models.responses import (
     SQLResponse,
@@ -5,9 +12,6 @@ from app.models.responses import (
     PlotlyFigureResponse,
     QuestionCacheResponse,
 )
-from app.services.vanna_service import vanna
-from app.services.cache_service import get_cache
-from app.api.dependencies import requires_cache
 
 router = APIRouter(prefix="/api", tags=["sql"])
 
@@ -19,7 +23,7 @@ async def generate_sql(
     """Generate SQL query from natural language question."""
     try:
         cache = get_cache()
-        id = cache.generate_id(question=question)
+        id = cache.generate_id()
         sql = vanna.generate_sql(question=question, allow_llm_to_see_data=True)
 
         cache.set(id=id, field="question", value=question)
@@ -40,8 +44,14 @@ async def run_sql(cache_data: dict = Depends(requires_cache(["sql"]))):
 
         df = vanna.run_sql(sql=sql)
         cache.set(id=id, field="df", value=df)
+        df_markdown = df.to_markdown(index=False)
 
-        return DataFrameResponse(id=id, df=df.head(10).to_json(orient="records"))
+        return DataFrameResponse(
+            id=id,
+            df=df.head(10).to_json(orient="records"),
+            df_markdown=df_markdown,
+        )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -49,30 +59,41 @@ async def run_sql(cache_data: dict = Depends(requires_cache(["sql"]))):
 @router.get("/generate_plotly_figure", response_model=PlotlyFigureResponse)
 async def generate_plotly_figure(
     cache_data: dict = Depends(requires_cache(["df", "question", "sql"]))
-):
-    """Generate Plotly visualization from query results."""
+) -> PlotlyFigureResponse:
+    """
+    Generate Plotly visualization from query results, save as static HTML,
+    and return the URL to the static asset.
+    """
     try:
         cache = get_cache()
         df = cache_data["df"]
-        question = cache_data["question"]
-        sql = cache_data["sql"]
         id = cache_data["id"]
+        sql = cache_data["sql"]
+        question = cache_data["question"]
 
         code = vanna.generate_plotly_code(
             question=question,
             sql=sql,
-            df_metadata=f"Running df.dtypes gives:\n {df.dtypes}",
+            df_metadata="Running df.dtypes gives:\n %s" % df.dtypes,
         )
+
         fig = vanna.get_plotly_figure(plotly_code=code, df=df, dark_mode=False)
         fig_json = fig.to_json()
+        full_html_content = fig.to_html(include_plotlyjs="cdn", full_html=True)
 
+        os.makedirs(settings.static_folder, exist_ok=True)
+        unique_chart_id = str(uuid.uuid4())
+        chart_filename = "vanna_chart_%s.html" % unique_chart_id
+        chart_file_path = os.path.join(settings.static_folder, chart_filename)
+        with open(chart_file_path, "w", encoding="utf-8") as f:
+            f.write(full_html_content)
+
+        chart_url = urljoin(settings.app_url, chart_file_path.replace("\\", "/"))
         cache.set(id=id, field="fig_json", value=fig_json)
+        cache.set(id=id, field="chart_url", value=chart_url)
+        return PlotlyFigureResponse(id=id, chart_url=chart_url)
 
-        return PlotlyFigureResponse(id=id, fig=fig_json)
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 

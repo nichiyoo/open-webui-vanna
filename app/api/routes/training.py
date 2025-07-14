@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
+from app.services.vanna_service import vanna
 from app.models.requests import TrainingDataRequest, RemoveTrainingDataRequest
 from app.models.responses import TrainingDataResponse, SuccessResponse
-from app.services.vanna_service import vanna, train_vanna_instance
 
 router = APIRouter(prefix="/api", tags=["training"])
 
@@ -30,15 +30,5 @@ async def remove_training_data(request: RemoveTrainingDataRequest):
             return SuccessResponse(success=True)
         else:
             raise HTTPException(status_code=400, detail="Couldn't remove training data")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/initialize_training", response_model=SuccessResponse)
-async def initialize_training():
-    """Initialize training data."""
-    try:
-        train_vanna_instance()
-        return SuccessResponse(success=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

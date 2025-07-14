@@ -24,12 +24,13 @@ class DataFrameResponse(BaseModel):
     type: str = "df"
     id: str
     df: str  # JSON string
+    df_markdown: str
 
 
 class PlotlyFigureResponse(BaseModel):
     type: str = "plotly_figure"
     id: str
-    fig: str  # JSON string
+    chart_url: str
 
 
 class TrainingDataResponse(BaseModel):

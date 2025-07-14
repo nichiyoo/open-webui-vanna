@@ -1,11 +1,13 @@
 import os
 import uvicorn
-from app.main import app
+
+DEBUG = os.environ.get("DEBUG", False)
+PORT = int(os.environ.get("PORT", 8000))
 
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
         host="localhost",
-        reload=os.environ.get("DEBUG", False),
-        port=int(os.environ.get("PORT", 8000)),
+        reload=DEBUG,
+        port=PORT,
     )

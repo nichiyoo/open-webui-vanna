@@ -12,105 +12,99 @@ licence: MIT
 import os
 import requests
 import logging
-from pprint import pprint
+import json
 from urllib.parse import urljoin
 from pydantic import BaseModel, Field
-from typing import List, Union, Generator, Iterator, Optional
-import json
+from typing import List, Union, Generator, Iterator, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
-def _generate_sql_from_vanna(api_url: str, question: str, verify_ssl: bool) -> dict:
+class APIError(Exception):
+    """Custom exception for API-related errors."""
+
+    pass
+
+
+def _make_request(
+    url: str,
+    params: Dict[str, Any],
+    verify_ssl: bool,
+    required_fields: List[str],
+) -> Dict[str, Any]:
     """
-    Generates an SQL query by sending a natural language question to the Vanna backend.
+    Makes HTTP request and validates response.
 
     Args:
-        api_url (str): The base URL of the Vanna backend.
-        question (str): The natural language question to generate SQL for.
-        verify_ssl (bool): Whether to verify SSL certificates for the request.
+        url: Request URL
+        params: Request parameters
+        verify_ssl: Whether to verify SSL certificates
+        required_fields: Required fields in response
 
     Returns:
-        dict: The JSON response from the Vanna API, expected to contain 'text' and 'id'.
+        Validated JSON response
 
     Raises:
-        requests.exceptions.RequestException: For any HTTP or connection errors.
-        requests.exceptions.HTTPStatusError: For bad HTTP responses (4xx or 5xx).
-        json.JSONDecodeError: If the response is not valid JSON.
-        ValueError: If the 'text' or 'id' field is missing from the Vanna response.
+        APIError: For any request or validation errors
     """
-    endpoint = urljoin(api_url, "/api/generate_sql")
-    params = {
-        "question": question,
-    }
+    try:
+        resp = requests.get(url, params=params, verify=verify_ssl, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
 
-    response = requests.get(endpoint, params=params, verify=verify_ssl)
-    response.raise_for_status()
+        missing = [f for f in required_fields if f not in data]
+        if missing:
+            raise APIError(f"Missing fields in response: {missing}")
 
-    sql_response = response.json()
-    if "text" in sql_response and "id" in sql_response:
-        return sql_response
-    else:
-        raise ValueError(
-            "Vanna: Invalid response from SQL generation service. Missing 'text' or 'id'."
-        )
+        return data
+    except requests.exceptions.RequestException as e:
+        raise APIError(f"Request failed: {e}")
+    except json.JSONDecodeError as e:
+        raise APIError(f"Invalid JSON response: {e}")
 
 
-def _run_sql_query(api_url: str, cache_id: str, verify_ssl: bool) -> str:
-    """
-    Executes an SQL query using the Vanna backend's run_sql endpoint.
+def _generate_sql_from_vanna(
+    api_url: str, question: str, verify_ssl: bool
+) -> Dict[str, Any]:
+    """Generates SQL query from natural language question."""
+    url = urljoin(api_url, "/api/generate_sql")
+    return _make_request(url, {"question": question}, verify_ssl, ["text", "id"])
 
-    Args:
-        api_url (str): The base URL of the Vanna backend.
-        cache_id (str): The cache ID of the generated SQL query.
-        verify_ssl (bool): Whether to verify SSL certificates for the request.
 
-    Returns:
-        str: The DataFrame result as a string (expected to be stringified JSON).
+def _run_sql_query(api_url: str, cache_id: str, verify_ssl: bool) -> Dict[str, Any]:
+    """Executes SQL query using cache ID."""
+    url = urljoin(api_url, "/api/run_sql")
+    return _make_request(url, {"id": cache_id}, verify_ssl, ["df_markdown"])
 
-    Raises:
-        requests.exceptions.RequestException: For any HTTP or connection errors.
-        requests.exceptions.HTTPStatusError: For bad HTTP responses (4xx or 5xx).
-        json.JSONDecodeError: If the response is not valid JSON.
-        ValueError: If the 'df' field is missing from the Vanna response.
-    """
-    endpoint = urljoin(api_url, "/api/run_sql")
-    params = {
-        "id": cache_id,
-    }
 
-    response = requests.get(endpoint, params=params, verify=verify_ssl)
-    response.raise_for_status()
-
-    df_response = response.json()
-    if "df" in df_response:
-        return df_response["df"]
-    else:
-        raise ValueError("Vanna: 'df' field missing from run_sql response.")
+def _generate_plotly_figure(
+    api_url: str, cache_id: str, verify_ssl: bool
+) -> Dict[str, Any]:
+    """Generates Plotly figure from query results."""
+    url = urljoin(api_url, "/api/generate_plotly_figure")
+    return _make_request(url, {"id": cache_id}, verify_ssl, ["chart_url"])
 
 
 class Pipeline:
     class Valves(BaseModel):
         API_URL: str = Field(
             default="http://host.docker.internal:4321",
-            description="The base URL of your Vanna backend. ",
+            description="The base URL of your Vanna backend",
         )
         VERIFY_SSL: bool = Field(
-            default=True,
-            description="Set to False to disable SSL verification.",
+            default=True, description="Set to False to disable SSL verification"
         )
         DEBUG: bool = Field(
-            default=False,
-            description="Enable debug logging for the pipeline.",
+            default=False, description="Enable debug logging for the pipeline"
         )
         OLLAMA_BASE_URL: str = Field(
             default="http://host.docker.internal:11434",
-            description="The base URL for the Ollama API (e.g., http://localhost:11434 or http://host.docker.internal:11434 if Ollama is on host).",
+            description="The base URL for the Ollama API",
         )
         OLLAMA_MODEL_NAME: str = Field(
             default="llama3",
-            description="The name of the Ollama model to use for formatting (e.g., 'llama3', 'mistral').",
+            description="The name of the Ollama model to use for formatting",
         )
 
     def __init__(self):
@@ -120,173 +114,167 @@ class Pipeline:
         logger.setLevel(logging.DEBUG if self.valves.DEBUG else logging.INFO)
 
     async def on_startup(self):
-        logger.info("on_startup: %s" % self.name)
-        pass
+        logger.info(f"on_startup: {self.name}")
 
     async def on_shutdown(self):
-        logger.info("on_shutdown: %s" % self.name)
-        pass
+        logger.info(f"on_shutdown: {self.name}")
 
-    async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        logger.debug("inlet: %s" % self.name)
-        if self.valves.DEBUG:
-            logger.debug("inlet: %s - body:" % self.name)
-            pprint(body)
-            logger.debug("inlet: %s - user:" % self.name)
-            pprint(user)
+    async def inlet(
+        self, body: Dict[str, Any], user: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        logger.debug(f"inlet: {self.name}")
         return body
 
-    async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        logger.debug("outlet: %s" % self.name)
-        if self.valves.DEBUG:
-            logger.debug("outlet: %s - body:" % self.name)
-            pprint(body)
-            logger.debug("outlet: %s - user:" % self.name)
-            pprint(user)
+    async def outlet(
+        self, body: Dict[str, Any], user: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        logger.debug(f"outlet: {self.name}")
         return body
 
-    def pipe(
-        self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> Union[str, Generator, Iterator]:
-        logger.info("pipe: %s" % self.name)
+    def status(self, desc: str, done: bool) -> Dict[str, Any]:
+        """Helper function to yield status update."""
+        return {
+            "event": {
+                "type": "status",
+                "data": {"description": desc, "done": done},
+            }
+        }
 
-        if self.valves.DEBUG:
-            logger.debug(
-                "pipe: %s - received message from user: %s" % (self.name, user_message)
-            )
+    def ollama(self, msgs: List[Dict[str, Any]]) -> Generator[str, None, None]:
+        """
+        Streams completions from Ollama API with robust error handling.
+
+        Args:
+            msgs: List of message dictionaries
+
+        Yields:
+            Content chunks from Ollama model response
+
+        Raises:
+            APIError: For any API-related errors
+        """
+        payload = {
+            "model": self.valves.OLLAMA_MODEL_NAME,
+            "messages": msgs,
+            "stream": True,
+        }
+
+        url = urljoin(self.valves.OLLAMA_BASE_URL, "/v1/chat/completions")
 
         try:
-            yield {
-                "event": {
-                    "type": "status",
-                    "data": {"description": "Vanna: Generating SQL...", "done": False},
-                }
-            }
+            with requests.post(url, json=payload, stream=True, timeout=60) as resp:
+                resp.raise_for_status()
 
-            vanna_response = _generate_sql_from_vanna(
-                api_url=self.valves.API_URL,
-                question=user_message,
-                verify_ssl=self.valves.VERIFY_SSL,
-            )
-            sql_text = vanna_response["text"]
-            cache_id = vanna_response["id"]
+                for chunk in resp.iter_lines(decode_unicode=True):
+                    if not chunk or not chunk.startswith("data: "):
+                        continue
 
-            yield "```sql\n%s\n```" % sql_text
+                    try:
+                        if chunk == "data: [DONE]":
+                            break
 
-            yield {
-                "event": {
-                    "type": "status",
-                    "data": {
-                        "description": "Vanna: Running SQL query...",
-                        "done": False,
-                    },
-                }
-            }
+                        data = json.loads(chunk[6:])
 
-            df_result_str = _run_sql_query(
-                api_url=self.valves.API_URL,
-                cache_id=cache_id,
-                verify_ssl=self.valves.VERIFY_SSL,
-            )
+                        choices = data.get("choices", [])
+                        if not choices:
+                            continue
 
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content")
+
+                        if content:
+                            yield content
+
+                    except json.JSONDecodeError:
+                        logger.warning(f"Failed to parse chunk: {chunk}")
+                        continue
+
+        except requests.exceptions.RequestException as e:
+            raise APIError(f"Ollama request failed: {e}")
+
+    def pipe(
+        self,
+        user_message: str,
+        model_id: str,
+        messages: List[Dict[str, Any]],
+        body: Dict[str, Any],
+    ) -> Union[str, Generator, Iterator]:
+        """Main pipeline processing function."""
+
+        if user_message.strip().startswith("### Task"):
             try:
-                df_data = json.loads(df_result_str)
-            except json.JSONDecodeError:
-                logger.error("Vanna: Failed to decode df_result_str into JSON.")
-                yield "Vanna: Error: Could not parse SQL results for formatting."
-                return
+                yield from self.ollama(messages)
+            except APIError as e:
+                logger.exception(f"Task processing error: {e}")
+                yield f"Error processing task: {e}"
+            return
 
-            yield {
-                "event": {
-                    "type": "status",
-                    "data": {
-                        "description": "Vanna: Rendering results in table...",
-                        "done": True,
-                    },
-                }
-            }
+        cache_id = None
 
-            ollama_prompt_messages = [
+        try:
+            yield self.status("Generating SQL...", False)
+
+            resp = _generate_sql_from_vanna(
+                self.valves.API_URL, user_message, self.valves.VERIFY_SSL
+            )
+            sql_text = resp["text"]
+            cache_id = resp["id"]
+
+            yield f"```sql\n{sql_text}\n```"
+
+        except APIError as e:
+            logger.exception(f"SQL generation error: {e}")
+            yield self.status("Error during SQL generation", True)
+            return
+
+        try:
+            yield self.status("Running SQL query and rendering results...", False)
+
+            resp = _run_sql_query(self.valves.API_URL, cache_id, self.valves.VERIFY_SSL)
+            df_json = resp.get("df", {})
+            df_md = resp["df_markdown"]
+
+            yield "\n### Data result\n\n"
+
+            prompt_msgs = [
                 {
                     "role": "user",
-                    "content": "Here is some data in JSON format: %s. Please provide a brief summary or introduction to this data, and then present it as a clean and readable Markdown table. **Do not wrap the table in a code block.** Ensure all columns headers are clear."
-                    % json.dumps(df_data),
+                    "content": (
+                        f"Carefully analyze the following JSON data: {json.dumps(df_json)}\n\n"
+                        "**Task:**\n"
+                        "Based on the processed and focused data, provide a concise, insightful summary of the key information. "
+                        f"Following the summary, accurately render the data into a Markdown table using the provided structure: {df_md}\n\n"
+                        "If any entry within the data (from the JSON or already in the table structure) contains a valid image URL, embed that image directly into its corresponding table cell. Use the standard Markdown image syntax (`![description](URL)`), ensuring 'description' is a brief, relevant alternative text for the image.\n\n"
+                        "**Output Format:** Your response must be **plain text**, beginning with the summary and immediately followed by the Markdown table."
+                        "**Absolutely do not wrap any part of your output in a code block**.\n"
+                    ),
                 }
             ]
 
-            ollama_payload = {
-                "model": self.valves.OLLAMA_MODEL_NAME,
-                "messages": ollama_prompt_messages,
-                "stream": True,
-            }
+            yield from self.ollama(prompt_msgs)
 
-            ollama_completion_url = urljoin(
-                self.valves.OLLAMA_BASE_URL, "/v1/chat/completions"
+        except APIError as e:
+            logger.exception(f"Summary generation error: {e}")
+            yield self.status("Error during summary generation", True)
+            return
+
+        try:
+            yield self.status("Generating Plotly chart...", False)
+
+            resp = _generate_plotly_figure(
+                self.valves.API_URL, cache_id, self.valves.VERIFY_SSL
+            )
+            chart_url = resp["chart_url"]
+
+            yield "\n### Visualization\n\n"
+            yield (
+                f'<iframe src="{chart_url}" width="100%" height="500px" '
+                'frameborder="0" sandbox="allow-scripts allow-same-origin" '
+                'style="border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);"></iframe>\n\n'
             )
 
-            yield {
-                "event": {
-                    "type": "status",
-                    "data": {
-                        "description": "Vanna: Formatting results...",
-                        "done": False,
-                    },
-                }
-            }
+        except APIError as e:
+            logger.warning(f"Could not generate Plotly chart: {e}")
+            yield self.status("Plotly chart generation skipped", True)
 
-            ollama_response = requests.post(
-                ollama_completion_url,
-                json=ollama_payload,
-                stream=True,
-            )
-
-            ollama_response.raise_for_status()
-
-            yield "\n## Data result\n\n"
-
-            for chunk in ollama_response.iter_lines():
-                if chunk:
-                    decoded_chunk = chunk.decode("utf-8")
-                    if decoded_chunk.startswith("data: "):
-                        try:
-                            json_data = json.loads(decoded_chunk[6:])
-                            if (
-                                json_data.get("choices")
-                                and json_data["choices"][0].get("delta")
-                                and json_data["choices"][0]["delta"].get("content")
-                            ):
-                                yield json_data["choices"][0]["delta"]["content"]
-                        except json.JSONDecodeError:
-                            logger.error(
-                                "Vanna: Failed to decode Ollama stream chunk: %s"
-                                % decoded_chunk
-                            )
-                            continue
-
-            yield {
-                "event": {
-                    "type": "status",
-                    "data": {
-                        "description": "Vanna: SQL execution and formatting complete.",
-                        "done": True,
-                    },
-                }
-            }
-
-        except Exception as e:
-            logger.exception(
-                "Vanna: An error occurred during SQL generation/execution/formatting: %s"
-                % e
-            )
-
-            yield {
-                "event": {
-                    "type": "status",
-                    "data": {
-                        "description": "Vanna: Error during SQL process.",
-                        "done": True,
-                    },
-                }
-            }
-
-            yield "Vanna: An error occurred while generating, executing, or formatting SQL. Please try again."
+        yield self.status("Formatting results complete", True)

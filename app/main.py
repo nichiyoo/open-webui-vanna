@@ -1,6 +1,10 @@
 from typing import Dict
 from dotenv import load_dotenv
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
 from app.config import settings
 from app.api.routes import questions, sql, data, training
 
@@ -12,10 +16,19 @@ app = FastAPI(
     debug=settings.debug,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.origin_url],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(sql.router)
 app.include_router(data.router)
 app.include_router(training.router)
 app.include_router(questions.router)
+app.mount("/static", StaticFiles(directory=settings.static_folder), name="static")
 
 
 @app.get("/")
